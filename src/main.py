@@ -25,8 +25,8 @@ def _auto_seed():
         else:
             logger.info(f"Database already has {count} organizations — skipping seed.")
     except Exception as e:
+        # log but don't crash — app should still start even if seed fails
         logger.error(f"Seed failed: {e}")
-        raise
     finally:
         db.close()
 
@@ -34,8 +34,12 @@ def _auto_seed():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # create tables then seed on startup
-    Base.metadata.create_all(bind=engine)
-    _auto_seed()
+    # wrap in try/except so a DB issue doesn't prevent the app from starting
+    try:
+        Base.metadata.create_all(bind=engine)
+        _auto_seed()
+    except Exception as e:
+        logger.error(f"Startup DB init failed: {e} — app will start anyway")
     yield
 
 
