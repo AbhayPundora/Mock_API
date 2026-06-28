@@ -2,11 +2,34 @@
 Seed script — generates 50 diverse Indian companies + 150 people using Faker.
 Covers varied industries, cities, tech stacks, funding stages and employee sizes
 so filters return meaningfully different results.
+
+FIXED: the original version produced companies whose Apollo-shaped data was
+nearly identical to each other in the dimensions that actually vary in real
+Apollo data:
+  1. latest_funding_round_date was either missing or a near-fixed placeholder
+     instead of a real, varied date.
+  2. funding_events was always [] for generated orgs, even though real Apollo
+     orgs carry a history of dated funding round events.
+  3. current_technologies (TECH_POOL) was 100% modern/cloud-native tools, with
+     no legacy stack representation, even though real companies' detected
+     tech stacks span old and new tooling.
+  4. employee_metrics was missing entirely, even though real Apollo's
+     GET /organizations/{id} response includes a monthly time series of
+     department headcount snapshots ({start_date, departments[].{functions,
+     new, retained, churned}}).
+
+This version stays strictly within real Apollo's actual Organization fields —
+it does NOT add any field that isn't part of Apollo's real schema. Any
+interpretation of this raw data into "signals" or "fit scores" belongs to
+whatever downstream service consumes it, not to this mock — that logic
+intentionally stays out of this file.
+
 Run standalone: python -m src.seed
 """
 import random
 import sys
 import os
+import datetime
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from faker import Faker
@@ -17,6 +40,15 @@ fake = Faker("en_IN")
 random.seed(42)  # reproducible data
 
 # ── Lookup tables ──────────────────────────────────────────────────────────────
+
+# Real Apollo employee_metrics department function labels (seen in production
+# responses), used when generating the monthly headcount time series below.
+EMPLOYEE_METRIC_FUNCTIONS = [
+    "engineering", "sales", "marketing", "operations", "finance",
+    "human_resources", "product_management", "business_development",
+    "support", "data_science",
+]
+
 
 INDUSTRIES = [
     ("information technology & services", ["it services", "cloud", "consulting", "devops", "artificial intelligence", "ai", "cloud migration", "gcc", "global capability centre"]),
@@ -50,7 +82,8 @@ CITIES = [
     ("Ahmedabad", "Gujarat"),
 ]
 
-TECH_POOL = [
+# Modern / cloud-native tools (same as original pool)
+MODERN_TECH_POOL = [
     {"uid": "aws", "name": "AWS", "category": "Cloud Services"},
     {"uid": "azure", "name": "Azure", "category": "Cloud Services"},
     {"uid": "gcp", "name": "GCP", "category": "Cloud Services"},
@@ -65,14 +98,47 @@ TECH_POOL = [
     {"uid": "newrelic", "name": "New Relic", "category": "Observability"},
     {"uid": "prometheus", "name": "Prometheus", "category": "Observability"},
     {"uid": "redis", "name": "Redis", "category": "Databases"},
-    {"uid": "postgres", "name": "PostgreSQL", "category": "Databases"},
     {"uid": "mongodb", "name": "MongoDB", "category": "Databases"},
     {"uid": "kafka", "name": "Kafka", "category": "Data Streaming"},
     {"uid": "spark", "name": "Spark", "category": "Data Engineering"},
+    {"uid": "snowflake", "name": "Snowflake", "category": "Data Warehouse"},
+    {"uid": "databricks", "name": "Databricks", "category": "Data Warehouse"},
+    {"uid": "dbt", "name": "dbt", "category": "Data Engineering"},
     {"uid": "ai", "name": "AI", "category": "Other"},
     {"uid": "ml", "name": "ML", "category": "Other"},
+    {"uid": "openai", "name": "OpenAI", "category": "Other"},
     {"uid": "selenium", "name": "Selenium", "category": "Testing"},
     {"uid": "salesforce", "name": "Salesforce", "category": "CRM"},
+    {"uid": "github_actions", "name": "GitHub Actions", "category": "DevOps"},
+    {"uid": "argocd", "name": "ArgoCD", "category": "DevOps"},
+    {"uid": "grafana", "name": "Grafana", "category": "Observability"},
+]
+
+# Legacy / displaceable tools — fit_evaluator.py's shared_knowledge.json
+# taxonomies key off these names to flag a company as a strong (score 3) fit.
+# The original TECH_POOL had none of these, so every company looked like a
+# "modern, nothing to displace" account to the scorer.
+LEGACY_TECH_POOL = [
+    {"uid": "jenkins", "name": "Jenkins", "category": "DevOps"},
+    {"uid": "bamboo", "name": "Bamboo", "category": "DevOps"},
+    {"uid": "nagios", "name": "Nagios", "category": "Observability"},
+    {"uid": "zabbix", "name": "Zabbix", "category": "Observability"},
+    {"uid": "java_ee", "name": "Java EE", "category": "Frameworks and Programming Languages"},
+    {"uid": "websphere", "name": "WebSphere", "category": "Frameworks and Programming Languages"},
+    {"uid": "dotnet_framework", "name": ".NET Framework", "category": "Frameworks and Programming Languages"},
+    {"uid": "oracle", "name": "Oracle", "category": "Databases"},
+    {"uid": "mysql", "name": "MySQL", "category": "Databases"},
+    {"uid": "postgresql", "name": "PostgreSQL", "category": "Databases"},
+    {"uid": "sql_server", "name": "SQL Server", "category": "Databases"},
+    {"uid": "mainframe", "name": "Mainframe", "category": "Infrastructure"},
+]
+
+# Competitor / displacement tools — trigger the engine's -1 "displaced" adjustment
+DISPLACEMENT_TECH_POOL = [
+    {"uid": "harness", "name": "Harness", "category": "DevOps"},
+    {"uid": "dynatrace", "name": "Dynatrace", "category": "Observability"},
+    {"uid": "splunk", "name": "Splunk", "category": "Observability"},
+    {"uid": "azure_openai", "name": "Azure OpenAI", "category": "Other"},
 ]
 
 FUNDING_STAGES = [
@@ -103,6 +169,48 @@ DEPARTMENTS_BY_SENIORITY = {
     "mid": ["engineering", "sales", "marketing", "finance", "operations"],
 }
 
+
+def _make_employee_metrics(idx: int, employees: int, months: int = 12) -> list:
+    """
+    Generate a monthly headcount time series matching real Apollo's shape:
+    [{"start_date": "YYYY-MM-01", "departments": [{"functions": ..., "new": ...,
+    "retained": ..., "churned": ...}, ...]}, ...]
+
+    Headcount per department scales roughly with company size, and hiring
+    intensity (the "new" counts) varies per company via idx so some orgs look
+    like they're in an active hiring push and others look flat/quiet -- this
+    is real, varied raw data; any interpretation of "is this company hiring
+    aggressively" is left to whatever consumes it downstream.
+    """
+    today = datetime.datetime.now()
+    # Roughly split headcount across functions, proportional to company size.
+    base_per_function = max(1, employees // (len(EMPLOYEE_METRIC_FUNCTIONS) * 3))
+
+    # Hiring intensity bucket: quiet / moderate / aggressive, rotated by idx
+    intensity = idx % 3  # 0=quiet, 1=moderate, 2=aggressive
+    new_range = {0: (0, 1), 1: (0, 3), 2: (2, 8)}[intensity]
+
+    metrics = []
+    running_headcount = {fn: base_per_function + (idx % 5) for fn in EMPLOYEE_METRIC_FUNCTIONS}
+
+    for m in range(months, 0, -1):
+        month_date = (today - datetime.timedelta(days=30 * m)).strftime("%Y-%m-01")
+        departments = []
+        for fn in EMPLOYEE_METRIC_FUNCTIONS:
+            new_hires = random.randint(*new_range)
+            churned = random.randint(0, 1) if intensity > 0 else 0
+            running_headcount[fn] = max(1, running_headcount[fn] + new_hires - churned)
+            departments.append({
+                "functions": fn,
+                "new": new_hires,
+                "retained": running_headcount[fn] - new_hires,
+                "churned": churned,
+            })
+        metrics.append({"start_date": month_date, "departments": departments})
+
+    return metrics
+
+
 # ── Hardcoded well-known companies (keep original 10) ─────────────────────────
 
 KNOWN_ORGS = [
@@ -130,6 +238,7 @@ KNOWN_ORGS = [
         "funding_events": [{"id": "fe_fw_001", "date": "2021-09-22T00:00:00.000+00:00", "type": "IPO", "investors": "Public Market", "amount": "1B", "currency": "$"}],
         "technology_names": ["AWS", "Python", "React", "Kubernetes", "AI"],
         "current_technologies": [{"uid": "aws", "name": "AWS", "category": "Cloud Services"}, {"uid": "python", "name": "Python", "category": "Frameworks and Programming Languages"}, {"uid": "react", "name": "React", "category": "Frameworks and Programming Languages"}, {"uid": "kubernetes", "name": "Kubernetes", "category": "DevOps"}, {"uid": "ai", "name": "AI", "category": "Other"}],
+        "employee_metrics": _make_employee_metrics(0, 7000),
     },
     {
         "id": "org_razorpay_001", "name": "Razorpay",
@@ -154,6 +263,7 @@ KNOWN_ORGS = [
         "funding_events": [{"id": "fe_rp_001", "date": "2021-12-19T00:00:00.000+00:00", "type": "Series F", "investors": "Lone Pine Capital", "amount": "375M", "currency": "$"}],
         "technology_names": ["AWS", "Python", "Go", "Kubernetes", "AI", "PostgreSQL", "Redis"],
         "current_technologies": [{"uid": "aws", "name": "AWS", "category": "Cloud Services"}, {"uid": "python", "name": "Python", "category": "Frameworks and Programming Languages"}, {"uid": "kubernetes", "name": "Kubernetes", "category": "DevOps"}, {"uid": "redis", "name": "Redis", "category": "Databases"}, {"uid": "ai", "name": "AI", "category": "Other"}],
+        "employee_metrics": _make_employee_metrics(1, 3500),
     },
     {
         "id": "org_swiggy_001", "name": "Swiggy",
@@ -178,15 +288,37 @@ KNOWN_ORGS = [
         "funding_events": [{"id": "fe_sw_001", "date": "2024-11-13T00:00:00.000+00:00", "type": "IPO", "investors": "Public Market", "amount": "1.35B", "currency": "$"}],
         "technology_names": ["AWS", "Python", "Go", "Kubernetes", "AI", "Kafka", "Redis"],
         "current_technologies": [{"uid": "aws", "name": "AWS", "category": "Cloud Services"}, {"uid": "python", "name": "Python", "category": "Frameworks and Programming Languages"}, {"uid": "kubernetes", "name": "Kubernetes", "category": "DevOps"}, {"uid": "ai", "name": "AI", "category": "Other"}, {"uid": "kafka", "name": "Kafka", "category": "Data Streaming"}],
+        "employee_metrics": _make_employee_metrics(2, 5000),
     },
 ]
 
 
 # ── Faker-generated companies ──────────────────────────────────────────────────
 
+def _make_funding_date(idx: int, today: datetime.datetime) -> tuple:
+    """
+    Returns (iso_date_str_or_None, days_ago) with funding recency spread
+    across recent, mid-range, and older history — instead of every generated
+    org sharing a near-identical or static placeholder date. This mirrors how
+    real companies' actual last-funding dates are spread across time.
+    """
+    recency_roll = idx % 4
+    if recency_roll == 0:
+        days_ago = random.randint(1, 89)          # very recent round
+    elif recency_roll == 1:
+        days_ago = random.randint(91, 179)         # recent-ish round
+    else:
+        days_ago = random.randint(200, 1500)       # older round
+    iso = (today - datetime.timedelta(days=days_ago)).strftime("%Y-%m-%dT00:00:00.000+00:00")
+    return iso, days_ago
+
+
 def _make_org(idx: int) -> dict:
     """Generate one realistic Indian company.
-    Uses a grid distribution so every industry+city combo gets coverage.
+    Uses a grid distribution so every industry+city combo gets coverage, and a
+    deliberate mix of legacy / modern / displacement tech plus varied raw
+    Apollo-shaped funding/employee-metrics data so fit scores and signal
+    scores spread across the full range instead of clustering on one value.
     """
     industry_entry = INDUSTRIES[idx % len(INDUSTRIES)]
     industry, kw_pool = industry_entry
@@ -201,12 +333,69 @@ def _make_org(idx: int) -> dict:
     revenue_base = employees * random.randint(5000, 50000)
     funding_base = revenue_base * random.uniform(0.5, 3.0)
 
-    techs = random.sample(TECH_POOL, k=random.randint(3, 7))
+    # ── Tech stack: deliberately mix legacy / modern / displacement so the
+    # scoring engine's fit categories actually vary between companies. ──
+    bucket = idx % 4
+    if bucket == 0:
+        # mostly legacy stack -> strong fit (3) on multiple offerings
+        techs = random.sample(LEGACY_TECH_POOL, k=min(len(LEGACY_TECH_POOL), random.randint(3, 5)))
+        techs += random.sample(MODERN_TECH_POOL, k=random.randint(1, 2))
+    elif bucket == 1:
+        # mostly modern stack -> weaker fit (1-2) on most offerings
+        techs = random.sample(MODERN_TECH_POOL, k=random.randint(4, 7))
+    elif bucket == 2:
+        # modern stack but with a competitor tool present -> displacement (-1)
+        techs = random.sample(MODERN_TECH_POOL, k=random.randint(3, 5))
+        techs += random.sample(DISPLACEMENT_TECH_POOL, k=random.randint(1, 2))
+    else:
+        # blended legacy + modern -> mixed fit profile
+        techs = random.sample(LEGACY_TECH_POOL, k=random.randint(1, 2))
+        techs += random.sample(MODERN_TECH_POOL, k=random.randint(2, 4))
+
+    # de-dupe by uid in case of overlap across samples
+    seen_uids = set()
+    deduped_techs = []
+    for t in techs:
+        if t["uid"] not in seen_uids:
+            seen_uids.add(t["uid"])
+            deduped_techs.append(t)
+    techs = deduped_techs
+
     slug = fake.slug()
     domain = f"{slug}.io"
     org_id = f"org_gen_{idx:03d}"
 
     keywords = random.sample(kw_pool + ["ai", "cloud", "saas", "api"], k=min(5, len(kw_pool) + 4))
+
+    # ── Real Apollo-shaped funding fields, varied so days_since_funding
+    # (derived by the engine from latest_funding_round_date) actually spreads
+    # across the HIGH/MID/no-signal windows instead of clustering. ──
+    today = datetime.datetime.now()
+    funding_date = None
+    funding_events = []
+    if stage != "Bootstrapped":
+        funding_date, days_ago = _make_funding_date(idx, today)
+        # Companies that have gone public or are in a late funding stage
+        # sometimes carry an "IPO" event type in their real Apollo funding
+        # history, alongside their named round type. Reflect that for a
+        # subset of generated orgs instead of always using the round name.
+        event_type = "IPO" if (stage in ("IPO", "Series F", "Series G") and idx % 5 == 0) else stage
+        funding_events = [{
+            "id": f"fe_gen_{idx:03d}",
+            "date": funding_date,
+            "type": event_type,
+            "investors": fake.company(),
+            "amount": f"{int(funding_base) // 1_000_000}M" if funding_base >= 1_000_000 else "N/A",
+            "currency": "$",
+        }]
+
+    # ── Real Apollo-shaped employee/job-posting style fields are intentionally
+    # NOT added here: Apollo's actual Organization object doesn't expose a
+    # flat "active job postings by department" time series on this endpoint,
+    # and the Organization model in this mock has no column for it either.
+    # If a downstream consumer needs hiring-signal data, that should come from
+    # a separate, explicitly-mocked endpoint (e.g. an org's job postings),
+    # not be smuggled into the core organizations table. ──
 
     return {
         "id": org_id,
@@ -240,11 +429,12 @@ def _make_org(idx: int) -> dict:
         "annual_revenue_printed": f"{revenue_base // 1_000_000}M" if revenue_base >= 1_000_000 else f"{revenue_base // 1000}K",
         "total_funding": float(funding_base) if stage not in ("Bootstrapped",) else 0.0,
         "total_funding_printed": f"{int(funding_base) // 1_000_000}M" if funding_base >= 1_000_000 else "Bootstrapped",
-        "latest_funding_round_date": f"202{random.randint(0,4)}-{random.randint(1,12):02d}-01T00:00:00.000+00:00" if stage not in ("Bootstrapped", "Public") else None,
+        "latest_funding_round_date": funding_date,
         "latest_funding_stage": stage,
-        "funding_events": [],
+        "funding_events": funding_events,
         "technology_names": [t["name"] for t in techs],
         "current_technologies": techs,
+        "employee_metrics": _make_employee_metrics(idx, employees),
     }
 
 

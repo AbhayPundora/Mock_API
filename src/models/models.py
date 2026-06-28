@@ -54,6 +54,10 @@ class Organization(Base):
     funding_events = Column(JSON, default=list)
     technology_names = Column(JSON, default=list)
     current_technologies = Column(JSON, default=list)
+    # Real Apollo shape: list of monthly snapshots, each with a start_date and
+    # a list of department rows {functions, new, retained, churned}. See
+    # GET /organizations/{id} response from real Apollo for the exact shape.
+    employee_metrics = Column(JSON, default=list)
 
     created_at = Column(DateTime, default=datetime.utcnow)
 

@@ -132,6 +132,7 @@ def _org_to_full_detail(org: Organization) -> dict:
         "funding_events": org.funding_events or [],
         "technology_names": org.technology_names or [],
         "current_technologies": org.current_technologies or [],
+        "employee_metrics": org.employee_metrics or [],
         "show_intent": False,
         "detail_view_loaded": True,
     }
