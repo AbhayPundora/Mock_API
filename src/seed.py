@@ -19,29 +19,22 @@ random.seed(42)  # reproducible data
 # ── Lookup tables ──────────────────────────────────────────────────────────────
 
 INDUSTRIES = [
-    ("information technology & services", ["it services", "cloud", "consulting", "devops"]),
-    ("computer software", ["saas", "devops", "crm", "erp", "cloud"]),
-    ("financial services", ["fintech", "payments", "banking", "insurance"]),
-    ("internet", ["ecommerce", "marketplace", "platform", "ai"]),
-    # ── These match what your app sends via industry_map ──────────────────────
-    # app sends: ["Retail", "Consumer Goods", "E-Commerce"]
-    # mock stores lowercase exact values — must match after lower()
-    ("retail", ["retail", "supply chain", "omnichannel", "d2c", "ecommerce"]),
-    ("consumer goods", ["consumer goods", "fmcg", "d2c", "retail", "supply chain"]),
-    ("e-commerce", ["ecommerce", "marketplace", "d2c", "retail", "ai", "logistics"]),
-    # ── Other industries ──────────────────────────────────────────────────────
-    ("healthcare", ["healthtech", "telemedicine", "ehr", "ai", "diagnostics"]),
-    ("education", ["edtech", "lms", "upskilling", "ai", "mooc"]),
-    ("logistics & supply chain", ["logistics", "last-mile", "fleet", "supply chain"]),
-    ("media & entertainment", ["ott", "streaming", "content", "adtech"]),
-    ("real estate", ["proptech", "realestate", "smart home", "iot"]),
-    # ── BFSI / Healthcare maps ────────────────────────────────────────────────
-    # app sends: ["Financial Services", "Banking", "Insurance"]
-    ("banking", ["banking", "neobank", "payments", "fintech"]),
-    ("insurance", ["insurance", "insurtech", "fintech", "ai"]),
-    # app sends: ["Hospital & Health Care", "Pharmaceuticals"]
-    ("hospital & health care", ["hospital", "healthtech", "ehr", "telemedicine"]),
-    ("pharmaceuticals", ["pharma", "biotech", "drug discovery", "ai"]),
+    ("information technology & services", ["it services", "cloud", "consulting", "devops", "artificial intelligence", "ai", "cloud migration", "gcc", "global capability centre"]),
+    ("computer software", ["saas", "devops", "crm", "erp", "cloud", "artificial intelligence", "ai", "cloud migration"]),
+    ("financial services", ["financial services", "fintech", "payments", "banking", "insurance", "artificial intelligence", "ai", "gcc"]),
+    ("internet", ["ecommerce", "e-commerce", "marketplace", "platform", "artificial intelligence", "ai", "cloud migration"]),
+    ("retail", ["retail", "supply chain", "omnichannel", "d2c", "ecommerce", "e-commerce", "artificial intelligence"]),
+    ("consumer goods", ["consumer goods", "fmcg", "d2c", "retail", "supply chain", "artificial intelligence"]),
+    ("e-commerce", ["ecommerce", "e-commerce", "marketplace", "d2c", "retail", "artificial intelligence", "logistics"]),
+    ("healthcare", ["healthcare", "healthtech", "telemedicine", "ehr", "artificial intelligence", "ai", "diagnostics", "cloud migration"]),
+    ("education", ["edtech", "lms", "upskilling", "artificial intelligence", "ai", "mooc"]),
+    ("logistics & supply chain", ["logistics", "last-mile", "fleet", "supply chain", "artificial intelligence", "cloud migration"]),
+    ("media & entertainment", ["ott", "streaming", "content", "adtech", "artificial intelligence"]),
+    ("real estate", ["proptech", "realestate", "smart home", "iot", "artificial intelligence"]),
+    ("banking", ["banking", "neobank", "payments", "fintech", "artificial intelligence", "gcc", "global capability centre"]),
+    ("insurance", ["insurance", "insurtech", "fintech", "artificial intelligence", "ai"]),
+    ("hospital & health care", ["hospital", "healthtech", "ehr", "telemedicine", "artificial intelligence", "cloud migration"]),
+    ("pharmaceuticals", ["pharmaceuticals", "pharma", "biotech", "drug discovery", "artificial intelligence", "ai"]),
 ]
 
 CITIES = [
