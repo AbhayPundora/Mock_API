@@ -19,16 +19,29 @@ random.seed(42)  # reproducible data
 # ── Lookup tables ──────────────────────────────────────────────────────────────
 
 INDUSTRIES = [
-    ("information technology & services", ["it services", "cloud", "consulting"]),
+    ("information technology & services", ["it services", "cloud", "consulting", "devops"]),
     ("computer software", ["saas", "devops", "crm", "erp", "cloud"]),
     ("financial services", ["fintech", "payments", "banking", "insurance"]),
     ("internet", ["ecommerce", "marketplace", "platform", "ai"]),
-    ("retail", ["retail", "supply chain", "omnichannel", "d2c"]),
+    # ── These match what your app sends via industry_map ──────────────────────
+    # app sends: ["Retail", "Consumer Goods", "E-Commerce"]
+    # mock stores lowercase exact values — must match after lower()
+    ("retail", ["retail", "supply chain", "omnichannel", "d2c", "ecommerce"]),
+    ("consumer goods", ["consumer goods", "fmcg", "d2c", "retail", "supply chain"]),
+    ("e-commerce", ["ecommerce", "marketplace", "d2c", "retail", "ai", "logistics"]),
+    # ── Other industries ──────────────────────────────────────────────────────
     ("healthcare", ["healthtech", "telemedicine", "ehr", "ai", "diagnostics"]),
     ("education", ["edtech", "lms", "upskilling", "ai", "mooc"]),
     ("logistics & supply chain", ["logistics", "last-mile", "fleet", "supply chain"]),
     ("media & entertainment", ["ott", "streaming", "content", "adtech"]),
     ("real estate", ["proptech", "realestate", "smart home", "iot"]),
+    # ── BFSI / Healthcare maps ────────────────────────────────────────────────
+    # app sends: ["Financial Services", "Banking", "Insurance"]
+    ("banking", ["banking", "neobank", "payments", "fintech"]),
+    ("insurance", ["insurance", "insurtech", "fintech", "ai"]),
+    # app sends: ["Hospital & Health Care", "Pharmaceuticals"]
+    ("hospital & health care", ["hospital", "healthtech", "ehr", "telemedicine"]),
+    ("pharmaceuticals", ["pharma", "biotech", "drug discovery", "ai"]),
 ]
 
 CITIES = [
@@ -179,13 +192,17 @@ KNOWN_ORGS = [
 # ── Faker-generated companies ──────────────────────────────────────────────────
 
 def _make_org(idx: int) -> dict:
-    """Generate one realistic Indian company."""
+    """Generate one realistic Indian company.
+    Uses a grid distribution so every industry+city combo gets coverage.
+    """
     industry_entry = INDUSTRIES[idx % len(INDUSTRIES)]
     industry, kw_pool = industry_entry
+
+    # distribute cities independently of industry so combos overlap
     city, state = CITIES[idx % len(CITIES)]
 
-    emp_bands = [50, 200, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000]
-    employees = emp_bands[idx % len(emp_bands)] + random.randint(0, 100)
+    emp_bands = [75, 150, 300, 600, 1200, 2500, 4000, 6000, 15000, 50000]
+    employees = emp_bands[idx % len(emp_bands)] + random.randint(0, 50)
 
     stage = FUNDING_STAGES[idx % len(FUNDING_STAGES)]
     revenue_base = employees * random.randint(5000, 50000)

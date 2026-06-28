@@ -184,13 +184,29 @@ def search_organizations(
             )
         )
 
-    # ── industry — exact match (case-insensitive) ──────────────────────────────
-    # Real Apollo maps industry tag IDs to exact industry strings.
-    # We accept the industry name directly and do exact match.
+    # ── industry — accepts both numeric Apollo tag IDs and plain name strings ──
+    # Real Apollo uses numeric IDs. The mock DB stores lowercase name strings.
+    # This map translates IDs → names so both work transparently.
+    APOLLO_INDUSTRY_ID_MAP = {
+        "6780": "financial services",
+        "6783": "banking",
+        "6787": "insurance",
+        "6852": "hospital & health care",
+        "6861": "pharmaceuticals",
+        "6926": "information technology & services",
+        "6930": "computer software",
+        "6942": "internet",
+        "6990": "retail",
+        "6991": "consumer goods",
+    }
     if body.organization_industry_tag_ids:
-        industry_lower = [i.lower().strip() for i in body.organization_industry_tag_ids]
+        # translate any numeric IDs to names, pass through plain strings as-is
+        resolved = [
+            APOLLO_INDUSTRY_ID_MAP.get(tag.strip(), tag.strip().lower())
+            for tag in body.organization_industry_tag_ids
+        ]
         query = query.filter(
-            func.lower(Organization.industry).in_(industry_lower)
+            func.lower(Organization.industry).in_(resolved)
         )
 
     # ── funding stage — exact match ────────────────────────────────────────────
