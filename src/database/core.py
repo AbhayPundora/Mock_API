@@ -4,6 +4,8 @@ from sqlalchemy.orm import sessionmaker, Session
 from typing import Annotated
 from fastapi import Depends, HTTPException, Header
 from dotenv import load_dotenv
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 load_dotenv()
 
@@ -12,6 +14,9 @@ API_KEY = os.getenv("API_KEY", "test-key-123")
 
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# shared rate limiter — imported by routers to avoid circular imports
+limiter = Limiter(key_func=get_remote_address)
 
 
 def get_db():

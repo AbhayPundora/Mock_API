@@ -1,14 +1,19 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
 from src.routers import organizations, people
-from src.database.core import engine, SessionLocal
+from src.database.core import engine, SessionLocal, limiter
 from src.models.models import Base, Organization
 
 logger = logging.getLogger(__name__)
+
+# rate limiter defined in database/core.py — imported here to attach to app
 
 
 def _auto_seed():
@@ -18,14 +23,12 @@ def _auto_seed():
         count = db.query(Organization).count()
         if count == 0:
             logger.info("Database is empty — running seed...")
-            # import here to avoid circular imports at module load time
             from src.seed import seed
             seed()
             logger.info("Seed complete.")
         else:
             logger.info(f"Database already has {count} organizations — skipping seed.")
     except Exception as e:
-        # log but don't crash — app should still start even if seed fails
         logger.error(f"Seed failed: {e}")
     finally:
         db.close()
@@ -33,8 +36,6 @@ def _auto_seed():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # create tables then seed on startup
-    # wrap in try/except so a DB issue doesn't prevent the app from starting
     try:
         Base.metadata.create_all(bind=engine)
         _auto_seed()
@@ -49,6 +50,10 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+# attach rate limiter
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,

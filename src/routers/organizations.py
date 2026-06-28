@@ -1,42 +1,57 @@
 import math
-import json
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 from typing import Optional
-from sqlalchemy import or_, and_, cast
+from sqlalchemy import or_, and_, cast, func
 from sqlalchemy.dialects.postgresql import JSONB
 
-from src.database.core import DbSession, verify_api_key
+from src.database.core import DbSession, verify_api_key, limiter
 from src.models.models import Organization
 
 router = APIRouter()
 
 
-# ── Request model ─────────────────────────────────────────────────────────────
+# ── Request model (mirrors real Apollo params) ────────────────────────────────
 
 class OrganizationSearchRequest(BaseModel):
+    # exact org IDs
+    organization_ids: list[str] = []
+    # exact domain match e.g. ["freshworks.com", "zoho.com"]
     q_organization_domains_list: list[str] = []
-    organization_num_employees_ranges: list[str] = []
+    # partial name search
+    q_organization_name: Optional[str] = None
+    # keyword tags — ALL must match (AND logic like real Apollo)
+    q_organization_keyword_tags: list[str] = []
+    # industry — exact match against industry field (case-insensitive)
+    organization_industry_tag_ids: list[str] = []
+    # location — exact city, state OR country (not partial substring)
     organization_locations: list[str] = []
     organization_not_locations: list[str] = []
-    q_organization_keyword_tags: list[str] = []
-    q_organization_name: Optional[str] = None
-    organization_ids: list[str] = []
+    # employee range e.g. ["1000,5000"]
+    organization_num_employees_ranges: list[str] = []
+    # tech UIDs — ANY match (OR logic)
     currently_using_any_of_technology_uids: list[str] = []
+    # funding stage — exact match e.g. ["Series B", "Series C"]
+    organization_latest_funding_stage_cd: list[str] = []
+    # revenue range e.g. {"min": 1000000, "max": 500000000}
     revenue_range: Optional[dict] = None
     page: int = 1
     per_page: int = 25
 
 
-def _obfuscate_last_name(last_name: str) -> str:
-    """Turn 'Zheng' into 'Zh***g'"""
-    if not last_name or len(last_name) <= 2:
-        return last_name
-    return last_name[:2] + "***" + last_name[-1]
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _location_matches(value: str, loc_filter: str) -> bool:
+    """
+    Strict location matching — the stored field must equal the filter value
+    (case-insensitive), not just contain it.
+    e.g. filter="Pune" matches city="Pune" but NOT state="Maharashtra"
+    """
+    return func.lower(value) == loc_filter.lower()
 
 
 def _org_to_search_result(org: Organization) -> dict:
-    """Return org in mixed_companies/search shape — minimal fields."""
+    """Minimal shape returned by mixed_companies/search."""
     return {
         "id": org.id,
         "name": org.name,
@@ -58,6 +73,12 @@ def _org_to_search_result(org: Organization) -> dict:
         "crunchbase_url": org.crunchbase_url,
         "primary_domain": org.primary_domain,
         "sanitized_phone": org.sanitized_phone,
+        "industry": org.industry,
+        "estimated_num_employees": org.estimated_num_employees,
+        "city": org.city,
+        "state": org.state,
+        "country": org.country,
+        "latest_funding_stage": org.latest_funding_stage,
         "owned_by_organization_id": None,
         "intent_strength": None,
         "show_intent": True,
@@ -67,7 +88,7 @@ def _org_to_search_result(org: Organization) -> dict:
 
 
 def _org_to_full_detail(org: Organization) -> dict:
-    """Return org in GET /organizations/{id} shape — full fields."""
+    """Full shape returned by GET /organizations/{id}."""
     return {
         "id": org.id,
         "name": org.name,
@@ -119,105 +140,150 @@ def _org_to_full_detail(org: Organization) -> dict:
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.post("/api/v1/mixed_companies/search")
+@limiter.limit("30/minute")
 def search_organizations(
+    request: Request,
     body: OrganizationSearchRequest,
     db: DbSession,
     _: str = Depends(verify_api_key),
 ):
-    """POST /api/v1/mixed_companies/search — mirrors Apollo org search."""
+    """
+    POST /api/v1/mixed_companies/search
+    All active filters are ANDed together (same as real Apollo).
+    Within a multi-value filter (e.g. multiple locations), values are ORed.
+    Empty filter list = that filter is ignored.
+    """
     query = db.query(Organization)
 
-    # filter by specific org IDs
+    # ── exact org IDs ──────────────────────────────────────────────────────────
     if body.organization_ids:
         query = query.filter(Organization.id.in_(body.organization_ids))
 
-    # filter by domain
+    # ── exact domain match ─────────────────────────────────────────────────────
+    # Real Apollo strips www., @, etc. — we match primary_domain exactly
     if body.q_organization_domains_list:
-        domain_filters = [
-            Organization.primary_domain.ilike(f"%{d}%")
-            for d in body.q_organization_domains_list
-        ]
-        query = query.filter(or_(*domain_filters))
-
-    # filter by name
-    if body.q_organization_name:
+        clean_domains = [d.lower().strip().lstrip("www.") for d in body.q_organization_domains_list]
         query = query.filter(
-            Organization.name.ilike(f"%{body.q_organization_name}%")
+            or_(
+                func.lower(Organization.primary_domain).in_(clean_domains)
+            )
         )
 
-    # filter by location
-    if body.organization_locations:
-        loc_filters = [
-            or_(
-                Organization.country.ilike(f"%{loc}%"),
-                Organization.city.ilike(f"%{loc}%"),
-                Organization.state.ilike(f"%{loc}%"),
+    # ── name — partial match (Apollo also does partial) ────────────────────────
+    if body.q_organization_name:
+        query = query.filter(
+            Organization.name.ilike(f"%{body.q_organization_name.strip()}%")
+        )
+
+    # ── keyword tags — ALL tags must appear in keywords (AND, not OR) ──────────
+    # Real Apollo treats multiple keyword tags as AND
+    for kw in body.q_organization_keyword_tags:
+        query = query.filter(
+            cast(Organization.keywords, JSONB).contains(
+                cast([kw.lower().strip()], JSONB)
             )
-            for loc in body.organization_locations
-        ]
+        )
+
+    # ── industry — exact match (case-insensitive) ──────────────────────────────
+    # Real Apollo maps industry tag IDs to exact industry strings.
+    # We accept the industry name directly and do exact match.
+    if body.organization_industry_tag_ids:
+        industry_lower = [i.lower().strip() for i in body.organization_industry_tag_ids]
+        query = query.filter(
+            func.lower(Organization.industry).in_(industry_lower)
+        )
+
+    # ── funding stage — exact match ────────────────────────────────────────────
+    if body.organization_latest_funding_stage_cd:
+        query = query.filter(
+            Organization.latest_funding_stage.in_(
+                body.organization_latest_funding_stage_cd
+            )
+        )
+
+    # ── location — strict: city OR state OR country must equal the value ───────
+    # Real Apollo matches HQ location exactly, not partial substring.
+    # e.g. "Pune" only matches city=Pune, not state=Maharashtra
+    if body.organization_locations:
+        loc_filters = []
+        for loc in body.organization_locations:
+            loc_lower = loc.lower().strip()
+            loc_filters.append(
+                or_(
+                    func.lower(Organization.city) == loc_lower,
+                    func.lower(Organization.state) == loc_lower,
+                    func.lower(Organization.country) == loc_lower,
+                )
+            )
+        # multiple locations = OR (any HQ matches)
         query = query.filter(or_(*loc_filters))
 
-    # exclude locations
+    # ── not locations — strict exclusion ──────────────────────────────────────
     if body.organization_not_locations:
         for loc in body.organization_not_locations:
+            loc_lower = loc.lower().strip()
             query = query.filter(
                 and_(
-                    ~Organization.country.ilike(f"%{loc}%"),
-                    ~Organization.city.ilike(f"%{loc}%"),
-                    ~Organization.state.ilike(f"%{loc}%"),
+                    func.lower(Organization.city) != loc_lower,
+                    func.lower(Organization.state) != loc_lower,
+                    func.lower(Organization.country) != loc_lower,
                 )
             )
 
-    # filter by employee count ranges e.g. ["250,1000", "5000,10000"]
+    # ── employee range — inclusive, multiple ranges are ORed ──────────────────
     if body.organization_num_employees_ranges:
         range_filters = []
         for r in body.organization_num_employees_ranges:
             parts = r.split(",")
             if len(parts) == 2:
-                min_e = int(parts[0]) if parts[0] else 0
-                max_e = int(parts[1]) if parts[1] else 9999999
-                range_filters.append(
-                    and_(
-                        Organization.estimated_num_employees >= min_e,
-                        Organization.estimated_num_employees <= max_e,
+                try:
+                    min_e = int(parts[0]) if parts[0].strip() else 0
+                    max_e = int(parts[1]) if parts[1].strip() else 9_999_999
+                    range_filters.append(
+                        and_(
+                            Organization.estimated_num_employees >= min_e,
+                            Organization.estimated_num_employees <= max_e,
+                        )
                     )
-                )
+                except ValueError:
+                    pass
         if range_filters:
             query = query.filter(or_(*range_filters))
 
-    # filter by technology UIDs — search inside the current_technologies JSON array
+    # ── tech UIDs — ANY match (OR), checks uid field inside JSON array ─────────
     if body.currently_using_any_of_technology_uids:
         tech_filters = [
             cast(Organization.current_technologies, JSONB).contains(
-                cast([{"uid": uid}], JSONB)
+                cast([{"uid": uid.lower().strip()}], JSONB)
             )
             for uid in body.currently_using_any_of_technology_uids
         ]
         query = query.filter(or_(*tech_filters))
 
-    # filter by revenue range e.g. {"min": 1000000, "max": 500000000}
+    # ── revenue range — inclusive ──────────────────────────────────────────────
     if body.revenue_range:
         min_rev = body.revenue_range.get("min")
         max_rev = body.revenue_range.get("max")
         if min_rev is not None:
-            query = query.filter(Organization.annual_revenue >= min_rev)
+            query = query.filter(Organization.annual_revenue >= float(min_rev))
         if max_rev is not None:
-            query = query.filter(Organization.annual_revenue <= max_rev)
+            query = query.filter(Organization.annual_revenue <= float(max_rev))
 
+    # ── pagination ─────────────────────────────────────────────────────────────
     total = query.count()
     page = max(1, body.page)
     per_page = min(100, max(1, body.per_page))
     offset = (page - 1) * per_page
     orgs = query.offset(offset).limit(per_page).all()
 
-    # build breadcrumbs from active filters
+    # ── breadcrumbs (mirrors Apollo response shape) ────────────────────────────
     breadcrumbs = []
     for r in body.organization_num_employees_ranges:
         breadcrumbs.append({
             "label": "# Employees",
             "signal_field_name": "organization_num_employees_ranges",
             "value": r,
-            "display_name": r.replace(",", "-"),
+            "display_name": r.replace(",", "–"),
         })
     for loc in body.organization_locations:
         breadcrumbs.append({
@@ -225,6 +291,13 @@ def search_organizations(
             "signal_field_name": "organization_locations",
             "value": loc,
             "display_name": loc,
+        })
+    for ind in body.organization_industry_tag_ids:
+        breadcrumbs.append({
+            "label": "Industry",
+            "signal_field_name": "organization_industry_tag_ids",
+            "value": ind,
+            "display_name": ind,
         })
 
     return {
@@ -237,7 +310,7 @@ def search_organizations(
             "page": page,
             "per_page": per_page,
             "total_entries": total,
-            "total_pages": math.ceil(total / per_page),
+            "total_pages": math.ceil(total / per_page) if total else 0,
         },
         "accounts": [],
         "organizations": [_org_to_search_result(o) for o in orgs],
@@ -248,7 +321,9 @@ def search_organizations(
 
 
 @router.get("/api/v1/organizations/{org_id}")
+@limiter.limit("60/minute")
 def get_organization(
+    request: Request,
     org_id: str,
     db: DbSession,
     _: str = Depends(verify_api_key),
